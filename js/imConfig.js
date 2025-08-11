@@ -1,5 +1,5 @@
 export const immersalParams = {
-    developerToken: "510588f605c4e5a11fd1cc47b431e70445e4fd59f85876663ddf31ec511417c3", // INSERT YOUR DEVELOPER TOKEN HERE
+    developerToken: 510588f605c4e5a11fd1cc47b431e70445e4fd59f85876663ddf31ec511417c3, // INSERT YOUR DEVELOPER TOKEN HERE
     mapIds: [130667],  // INSERT YOUR MAP ID/IDS HERE
     continuousLocalization: true,
     continuousInterval: 16, // ms
