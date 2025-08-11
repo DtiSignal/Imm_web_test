@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BABYLON + Immersal VPS for Web</title>
+<link rel="stylesheet" href="css/styles.css">
+<meta id="theme-color" name="theme-color" content="#37474F">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<script src="https://cdn.babylonjs.com/babylon.js"></script>
+<script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.js"></script>
+<script src="js/babylon/plyLoader.js"></script>
+</head>
+
+<body>
+<div id="container">
+  <canvas id="renderCanvas"></canvas>
+</div>
+<div id="uicontainer">
+  <div class="form-group">
+    <input type="radio" id="mode1" name="mode" value="ondevice" checked onclick="hide('serverlocui', this); show('devicelocui', this)"/>
+    <label for="mode1">On-device</label>
+    <input type="radio" id="mode2" name="mode" value="onserver" onclick="hide('devicelocui', this); show('serverlocui', this)"/>
+    <label for="mode2">On-server</label>
+  </div>
+  <div id="devicelocui" class="form-group">
+    <input type="checkbox" id="contloc" checked onclick="toggleLoc(this)"/>
+    <label for="contloc">Continuous localization</label>
+    <button id="locButton" class="button">Localize on device</button>
+  </div>
+  <div id="serverlocui" class="form-group">
+    <button id="locServerButton" class="button">Localize on server</button>
+  </div>
+  <div id="latlon">lat: <span id="latitude">0</span>, lon: <span id="longitude">0</span>, alt: <span id="altitude">0</span></div>
+</div>
+<button id="permButton" class="button">Start AR</button>
+<script type="module">
+  import { immersalParams } from './js/imConfig.js';
+  import { Immersal, createOrientationSensor } from './js/immersal.js';
+
+  const USE_FILTERING = true;
+
+  const container = document.getElementById("container");
+  const canvas = document.getElementById("renderCanvas");
+  const uiContainer = document.getElementById("uicontainer");
+  const permButton = document.getElementById("permButton");
+  const locButton = document.getElementById("locButton");
+  const locServerButton = document.getElementById("locServerButton");
+  const lat = document.getElementById("latitude");
+  const lon = document.getElementById("longitude");
+  const alt = document.getElementById("altitude");
+
+  const engine = new BABYLON.Engine(canvas, true, null, true);
+  engine.enableOfflineSupport = false;
+
+  const POS = BABYLON.Vector3.Zero();
+  const ROT = BABYLON.Quaternion.Identity();
+  const Q = BABYLON.Quaternion.Identity();
+  const QG = BABYLON.Quaternion.Identity();
+  
+  let camera, scene;
+  let logo, mesh, mixer;
+  let immersal;
+  let mapHandle = -1;
+  let pointCloud = null;
+  let contentLoaded = false;
+  let prevTime = 0;
+
+  const createScene = async () => {
+    scene = new BABYLON.Scene(engine);
+    scene.clearColor = new BABYLON.Color4(0, 0, 0, 0);
+    scene.useRightHandedSystem = true;
+
+    camera = new BABYLON.UniversalCamera("RenderCamera", BABYLON.Vector3.Zero(), scene);
+    camera.fovMode = BABYLON.Camera.FOVMODE_VERTICAL_FIXED;
+    scene.activeCamera = camera;
+    camera.attachControl(engine.getRenderingCanvas(), true);
+
+    const environ = BABYLON.CubeTexture.CreateFromPrefilteredData("./assets/palermo.env", scene);
+    scene.environmentTexture = environ;
+
+    const {meshes} = await BABYLON.SceneLoader.ImportMeshAsync(undefined, "./assets/", "immersal_LOGO.glb", scene);
+    logo = meshes.find((mesh) => mesh.name === "immersal");
+
+    return scene;
+  }
+
+  const init = async () => {
+    const mapId = immersalParams.mapIds[0];
+
+    immersal = await Immersal.Initialize(container, immersalParams);
+    mapHandle = await immersal.loadMap(mapId);
+
+    //await immersal.freeMap(mapHandle);
+
+    createScene(engine).then(scene => {
+      const pointCloud = new BABYLON.PointsCloudSystem("PointCloud", 10, scene, {updateable: true});
+      scene.onReadyObservable.add(() => {
+        const assetsManager = new BABYLON.AssetsManager(scene);
+        assetsManager.useDefaultLoadingScreen = false;
+        loadPLY(assetsManager, pointCloud, mapId);
+        assetsManager.loadAsync();
+      });
+
+      scene.onBeforeRenderObservable.add(render);
+
+      engine.runRenderLoop(() => {
+          scene.render();
+      });
+
+      uiContainer.style.display = "block";
+      
+      resize();
+      immersal.addEventListener('resize', resize);
+    });
+  }
+
+  permButton.addEventListener("click", function(e) {
+    createOrientationSensor().then(() => {
+      permButton.style.visibility = "hidden";
+      init();
+    });
+  });
+
+  locButton.addEventListener("click", function(e) {
+    if (immersal) {
+      immersal.localizeDeviceAsync()
+      .then(result => {
+        console.log(`[IMMERSAL] On-device localization result:`, result);
+      })
+      .catch(e => {
+        console.log(e);
+      });
+    }
+  });
+
+  locServerButton.addEventListener("click", function(e) {
+    if (immersal) {
+      immersal.localizeServerAsync()
+      .then(result => {
+        console.log(`[IMMERSAL] On-server localization result:`, result);
+      })
+      .catch(e => {
+        console.log(e);
+      });
+    }
+  });
+
+  const resize = (e) => {
+    engine.resize();
+  }
+
+  const render = () => {
+    const timestamp = performance.now();
+    const dt = timestamp - prevTime;
+    prevTime = timestamp;
+
+    if (mapHandle >= 0 && immersal.continuousLocalization) {
+      immersal.localizeDevice(timestamp);
+    }
+
+    if (immersal.localization.counter > 1) {
+      if (immersal.camera) {
+        const w = immersal.camera.el.width;
+        const h = immersal.camera.el.height;
+        const aspect = w / h;
+        let fovV = immersal.getVFov();
+        if (w > h) {
+          fovV /= aspect;
+        }
+        camera.fov = BABYLON.Tools.ToRadians(fovV);
+      }
+
+      const {position, rotation, elapsedTime, wgs84} = immersal.localizeInfo;
+
+      if (immersal.continuousLocalization) {
+        const {position, rotation} = immersal.getEstimatedPose(timestamp);
+
+        POS.set(position[0], position[1], position[2]);
+        Q.set(rotation[0], rotation[1], rotation[2], rotation[3]);
+        QG.set(immersal.gyroData.x, immersal.gyroData.y, immersal.gyroData.z, immersal.gyroData.w);
+        Q.multiplyToRef(QG, ROT);
+
+        if (USE_FILTERING) {
+          let step = 0.025 * dt;
+          if (step > 1.0)
+            step = 1.0;
+
+          BABYLON.Vector3.LerpToRef(camera.position, POS, step, camera.position);
+          camera.rotationQuaternion = ROT;
+        } else {
+          camera.position.set(POS.x, POS.y, POS.z);
+          camera.rotationQuaternion = ROT;
+        }
+      } else {
+        POS.set(position.x, position.y, position.z);
+        Q.set(rotation.x, rotation.y, rotation.z, rotation.w);
+        QG.set(immersal.gyroData.x, immersal.gyroData.y, immersal.gyroData.z, immersal.gyroData.w);
+        Q.multiplyToRef(QG, ROT);
+        camera.position.set(POS.x, POS.y, POS.z);
+        camera.rotationQuaternion = ROT;
+      }
+
+      lat.innerHTML = wgs84.latitude.toFixed(5);
+      lon.innerHTML = wgs84.longitude.toFixed(5);
+      alt.innerHTML = wgs84.altitude.toFixed(5);
+
+      //console.log(`latitude: ${wgs84.latitude}, longitude: ${wgs84.longitude}, altitude: ${wgs84.altitude}`);
+    }
+  }
+
+  // Load a .ply file from Immersal to visualize localization.
+  // Switch DOWNLOAD_SPARSE to DOWNLOAD_DENSE if you want to use the dense point cloud.
+  const loadPLY = (assetsManager, pointCloud, mapId) => {
+    console.log(`Loading .ply for map: [${mapId}]`);
+    const url = Immersal.BASE_URL + Immersal.DOWNLOAD_SPARSE + '?token=' + immersalParams.developerToken + '&id=' + mapId;
+    const binaryTask = assetsManager.addBinaryFileTask("downloadPlyBinary", url);
+    binaryTask.onError = (error) => {
+      console.error(`loadPLY: Failed to download ply: [${url}]`);
+    }
+    binaryTask.onSuccess = (task) => {
+      try {
+        const {vertices, colors} = plyLoader(task.data);
+        pointCloud.addPoints(Math.floor(vertices.length / 3), (particle, i, _) => {
+          particle.color = new BABYLON.Color3(
+            colors[i * 3],
+            colors[i * 3 + 1],
+            colors[i * 3 + 2]
+          );
+          particle.position = new BABYLON.Vector3(
+            vertices[i * 3],
+            vertices[i * 3 + 1],
+            vertices[i * 3 + 2]
+          )
+        });
+        pointCloud.setParticles();
+        pointCloud.buildMeshAsync();
+        console.log(`PLY loaded`);
+      } catch (error) {
+        console.error(`Failed to parse ply: ${error.message}`);
+      }
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", (e) => {
+    let s = location.search.substring(1);
+    let mapId = -1;
+    let token = null;
+
+    if (s.length > 0) {
+      s.split('&').forEach((item, index) => {
+        switch (index) {
+        case 0:
+          mapId = parseInt(item); break;
+        case 1:
+          token = item; break;
+        }
+      });
+    }
+
+    if (mapId !== -1) {
+      immersalParams.mapIds[0] = mapId;
+    }
+
+    if (token !== null) {
+      immersalParams.developerToken = token;
+    }
+  });
+
+  // UI functions
+
+  function show(el, box) {
+    document.getElementById(el).style.display = (box.checked) ? "block" : "none";
+  }
+
+  function hide(el, box) {
+    document.getElementById(el).style.display = (box.checked) ? "none" : "none";
+  }
+
+  function toggleLoc(box) {
+    immersal.continuousLocalization = box.checked;
+    locButton.style.display = (box.checked) ? "none" : "block";
+  }
+
+  window.show = show;
+  window.hide = hide;
+  window.toggleLoc = toggleLoc;
+</script>
+</body>
+</html>
