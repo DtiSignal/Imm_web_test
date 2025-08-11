@@ -1,0 +1,206 @@
+<!--
+Project: Immersal VPS + WebXR Starter (WebGPU fallback to WebGL)
+Files included in this single-file project:
+- index.html  (single-file app with embedded JS)
+- README (below in HTML comments)
+
+How to use:
+1) Save this file as `index.html` in a new folder.
+2) Edit the CONFIG section near top and insert your IMMERSAL_TOKEN and IMMERSAL_MAP_ID.
+3) For local testing, open http://localhost:8000 (localhost is considered secure) OR deploy to GitHub Pages for public HTTPS.
+   - To run local server quickly: `npx http-server -c-1 -p 8000` or `python -m http.server 8000`
+4) For WebGPU testing, use Chrome Canary with flags: chrome://flags/#enable-unsafe-webgpu = Enabled
+
+Notes:
+- This starter focuses on getting video + localization + rendering pipeline working quickly.
+- SPZ Gaussian Splatting is left as a modular loader (see TODO in code). If you have a JS/WASM SPZ loader, drop it into `loadSpz()`.
+- If WebGPU unavailable, the app falls back to Three.js WebGL renderer.
+
+-->
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <title>Immersal VPS + WebXR Starter</title>
+  <style>
+    html,body{height:100%;margin:0;background:#000;color:#0f0;font-family:monospace}
+    #app{width:100%;height:100%;position:relative}
+    canvas{width:100%;height:100%;display:block}
+    #log{position:absolute;left:8px;top:8px;color:#0f0;background:rgba(0,0,0,0.6);padding:6px;border-radius:4px}
+    #controls{position:absolute;right:8px;top:8px;background:rgba(0,0,0,0.6);padding:6px;border-radius:4px}
+    button{margin:4px}
+  </style>
+</head>
+<body>
+  <div id="app">
+    <canvas id="gpu-canvas"></canvas>
+    <div id="log">init...</div>
+    <div id="controls">
+      <button id="btn-localize">Localize now</button>
+      <button id="btn-load-glb">Load GLB sample</button>
+      <button id="btn-load-spz">(placeholder) Load SPZ</button>
+    </div>
+  </div>
+
+<script>
+/* CONFIG - edit these values */
+const IMMERSAL_TOKEN = 'YOUR_IMMERSAL_TOKEN';
+const IMMERSAL_MAP_ID = 'YOUR_MAP_ID';
+const SAMPLE_GLB = 'https://threejs.org/examples/models/gltf/DamagedHelmet/glTF/DamagedHelmet.gltf';
+
+const logEl = document.getElementById('log');
+function log(...args){ console.log(...args); logEl.textContent = args.join(' '); }
+
+const supportsWebGPU = !!navigator.gpu;
+const supportsWebXR = !!navigator.xr;
+log('supports WebGPU:', supportsWebGPU, 'WebXR:', supportsWebXR);
+
+const canvas = document.getElementById('gpu-canvas');
+let videoEl = null;
+let videoStream = null;
+let gpuDevice = null, gpuContext=null;
+let threeRenderer=null, threeScene=null, threeCamera=null;
+
+// --- CAMERA START ---
+async function startCamera(){
+  try{
+    videoStream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}, audio:false});
+    videoEl = document.createElement('video');
+    videoEl.autoplay = true; videoEl.playsInline = true; videoEl.muted = true; videoEl.srcObject = videoStream;
+    await videoEl.play();
+    log('camera started', videoEl.videoWidth+'x'+videoEl.videoHeight);
+    return true;
+  }catch(e){ log('camera error', e); return false; }
+}
+
+// --- WebGPU init ---
+async function initWebGPU(){
+  if(!supportsWebGPU) return false;
+  try{
+    const adapter = await navigator.gpu.requestAdapter();
+    gpuDevice = await adapter.requestDevice();
+    gpuContext = canvas.getContext('webgpu');
+    const format = navigator.gpu.getPreferredCanvasFormat();
+    gpuContext.configure({ device: gpuDevice, format, alphaMode: 'premultiplied' });
+    log('webgpu ready');
+    return true;
+  }catch(e){ log('webgpu init failed', e); return false; }
+}
+
+// --- Simple WebGL (Three.js) fallback ---
+function startThreeFallback(){
+  log('starting Three.js fallback');
+  const s = document.createElement('script'); s.src='https://cdn.jsdelivr.net/npm/three@0.154.0/build/three.min.js';
+  document.head.appendChild(s);
+  s.onload = async ()=>{
+    threeRenderer = new THREE.WebGLRenderer({canvas:canvas, antialias:true, alpha:true});
+    threeRenderer.setSize(window.innerWidth, window.innerHeight);
+    threeScene = new THREE.Scene();
+    threeCamera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.01, 1000);
+    threeCamera.position.set(0,0,0.5);
+    const light = new THREE.DirectionalLight(0xffffff,1); light.position.set(1,1,1);
+    threeScene.add(light);
+    // basic box
+    const geo = new THREE.BoxGeometry(0.2,0.2,0.2);
+    const mat = new THREE.MeshStandardMaterial({color:0x00ff00});
+    const cube = new THREE.Mesh(geo, mat); cube.position.set(0,0,-1);
+    threeScene.add(cube);
+    function anim(){ cube.rotation.y += 0.01; threeRenderer.render(threeScene, threeCamera); requestAnimationFrame(anim); }
+    anim();
+  };
+}
+
+// --- Simple Immersal REST call (placeholder) ---
+async function immersalLocalizeFromVideoFrame(){
+  if(!IMMERSAL_TOKEN || !IMMERSAL_MAP_ID){ log('Immersal token/map not set'); return null; }
+  try{
+    const w = 640; const h = Math.round(videoEl.videoHeight * w / videoEl.videoWidth);
+    const off = document.createElement('canvas'); off.width=w; off.height=h; const ctx=off.getContext('2d'); ctx.drawImage(videoEl,0,0,w,h);
+    const blob = await new Promise(r=>off.toBlob(r,'image/jpeg',0.8));
+    const arr = await blob.arrayBuffer();
+    // adjust URL & body according to Immersal API docs
+    const resp = await fetch('https://api.immersal.com/localize', { method:'POST', headers: { 'Authorization':'Bearer '+IMMERSAL_TOKEN, 'Content-Type':'application/octet-stream' }, body:arr });
+    if(!resp.ok){ log('immersal status', resp.status); return null; }
+    const data = await resp.json(); log('immersal', data); return data;
+  }catch(e){ log('immersal error', e); return null; }
+}
+
+// --- SPZ loader placeholder ---
+async function loadSpz(url){
+  // TODO: replace with actual SPZ loader (WASM or JS). The loader should produce either
+  // a WebGPU-friendly buffer set or return a THREE.Object3D for WebGL path.
+  log('loadSpz placeholder', url);
+  alert('SPZ loader not implemented in this starter. Use GLB or provide a spz-js/wasm loader.');
+}
+
+// --- GLB loader (Three.js) ---
+function loadGlbSample(){
+  if(typeof THREE === 'undefined'){ alert('Three.js not loaded yet'); return; }
+  const s = document.createElement('script'); s.src='https://cdn.jsdelivr.net/npm/three@0.154.0/examples/js/loaders/GLTFLoader.js'; document.head.appendChild(s);
+  s.onload = ()=>{
+    const loader = new THREE.GLTFLoader(); loader.load(SAMPLE_GLB, (g)=>{ threeScene.add(g.scene); log('glb added'); });
+  };
+}
+
+// --- UI Buttons ---
+document.getElementById('btn-localize').onclick = ()=>immersalLocalizeFromVideoFrame();
+document.getElementById('btn-load-glb').onclick = ()=>loadGlbSample();
+document.getElementById('btn-load-spz').onclick = ()=>loadSpz('model.spz');
+
+// --- main bootstrap ---
+(async ()=>{
+  const cam = await startCamera(); if(!cam) return;
+  const gpu = await initWebGPU(); if(!gpu){ startThreeFallback(); return; }
+
+  // Simple WebGPU render loop: clear + optionally draw placeholder
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  // create a trivial pipeline that clears to translucent so video might show under it if composited
+  function frame(){
+    const encoder = gpuDevice.createCommandEncoder();
+    const view = gpuContext.getCurrentTexture().createView();
+    const pass = encoder.beginRenderPass({ colorAttachments:[{ view, clearValue:{r:0,g:0,b:0,a:0}, loadOp:'clear', storeOp:'store' }] });
+    pass.end(); gpuDevice.queue.submit([encoder.finish()]);
+    requestAnimationFrame(frame);
+  }
+  frame();
+
+  log('running WebGPU clear loop. Press "Localize now" to call Immersal');
+})();
+</script>
+
+<!-- README
+
+Quick START instructions:
+
+1) Save this file as index.html in an empty folder
+2) Edit the top CONFIG constants to include your Immersal token and map id
+3) Start a local server:
+   - npm: npx http-server -c-1 -p 8000
+   - python: python -m http.server 8000
+   - Note: localhost is considered a secure origin for camera access
+4) Open http://localhost:8000 in your browser
+   - For WebGPU testing use Chrome Canary with flags: chrome://flags/#enable-unsafe-webgpu
+
+Deploy to GitHub Pages:
+1) Create a new GitHub repo and push this file as index.html on the gh-pages branch or main branch with pages enabled
+2) In repo settings enable GitHub Pages (source: main branch / root)
+3) After publish open the provided HTTPS URL
+
+Next steps to integrate SPZ Gaussian splats:
+1) Choose a SPZ loader implementation:
+   - spz-js (Node/WASM) or a port that exposes a browser-friendly loader
+2) The loader must either:
+   - produce THREE.BufferGeometry/Points (then it will work via Three.js WebGL fallback), or
+   - produce GPU buffers that you can render with WebGPU + WGSL shaders
+3) If SPZ requires WebGL2 or its own WebGL context, ensure you *give* the app a WebGL2 context before XR initialization and/or integrate it into the XR render pipeline. In 8th Wall you must use the XR8.Threejs pipeline instead.
+
+If you want, I can:
+- create a GitHub repo and push this starter (zip) for you;
+- implement SPZ -> THREE.Points conversion (if you provide the SPZ loader or allow me to pick one);
+- wire Immersal exact request format if you paste the Immersal API docs or credentials (keep tokens secret!)
+
+END README -->
+</body>
+</html>
